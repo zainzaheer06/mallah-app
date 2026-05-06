@@ -1,0 +1,84 @@
+# =============================================================================
+# Mallah Backend — Local + production-equivalent stack
+#
+# Usage:
+#   docker compose up -d              # start everything
+#   docker compose logs -f api        # tail API logs
+#   docker compose exec api alembic upgrade head   # run migrations
+#   docker compose down -v            # stop + remove volumes (DESTROYS DB)
+# =============================================================================
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: mallah-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mallah}
+      POSTGRES_USER: ${POSTGRES_USER:-mallah}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mallah_dev}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mallah} -d ${POSTGRES_DB:-mallah}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: mallah-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mallah-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mallah}:${POSTGRES_PASSWORD:-mallah_dev}@postgres:5432/${POSTGRES_DB:-mallah}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./firebase-creds.json:/app/firebase-creds.json:ro
+    # Run migrations on container start, then exec the CMD
+    command: ["sh", "/app/scripts/start.sh"]
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: mallah-nginx
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+
+volumes:
+  postgres_data:
+  redis_data:
